@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/abh/geoip"
 )
@@ -25,6 +26,8 @@ var (
 		"distromirrorstatusTWOHOURSBEHIND",
 		"distromirrorstatusUP",
 	}
+	status    map[string]bool
+	lastFetch int64
 )
 
 func fetchMirrorStatusHtml() (string, error) {
@@ -115,11 +118,7 @@ func countryCode(r *http.Request) (string, error) {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	country, err := countryCode(r)
-	if err != nil {
-		log.Fatalf("failed to get country code: %s", err.Error())
-	}
-
+	country, _ := countryCode(r)
 	if country == "" {
 		log.Printf("failed to lookup %s, defaulting to US", r.RemoteAddr)
 		country = "US"
@@ -127,12 +126,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	mirrors, err := mirrors(country)
 	if err != nil {
-		log.Fatalf("failed to get mirrors: %s", err.Error())
+		http.Error(w, "Failed to fetch mirrors", http.StatusInternalServerError)
+		return
 	}
 
-	status, err := mirrorStatus()
-	if err != nil {
-		log.Fatalf("failed to get mirrors status: %s", err.Error())
+	if time.Now().After(time.Unix(lastFetch, 0).Add(time.Minute * 60)) {
+		status, err = mirrorStatus()
+		if err != nil {
+			http.Error(w, "Failed to fetch mirror status", http.StatusInternalServerError)
+			return
+		}
+		lastFetch = time.Now().Unix()
 	}
 
 	// only output legit mirrors
@@ -151,7 +155,7 @@ func main() {
 		bindaddr = bindenv
 	}
 
-	http.HandleFunc("/", handler)
+	http.HandleFunc("/mirrors.txt", handler)
 	log.Printf("listening on %s", bindaddr)
 	if err := http.ListenAndServe(bindaddr, nil); err != nil {
 		log.Fatalf("listen failed: %s", err.Error())
