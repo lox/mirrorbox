@@ -8,11 +8,15 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/abh/geoip"
 )
 
 const (
-	MIRRORS_URL = "http://mirrors.ubuntu.com/mirrors.txt"
+	BIND_ADDR   = ":80"
+	MIRRORS_URL = "http://mirrors.ubuntu.com/%s.txt"
 	STATUS_URL  = "https://launchpad.net/ubuntu/+archivemirrors"
+	GEOIP_DB    = "/usr/share/GeoIP/GeoIP.dat"
 )
 
 var (
@@ -67,12 +71,14 @@ func mirrorStatus() (map[string]bool, error) {
 	return status, nil
 }
 
-func mirrors() ([]string, error) {
-	log.Printf("fetching %s", MIRRORS_URL)
-	response, err := http.Get(MIRRORS_URL)
+// gets an array of mirrors for a given country
+func mirrors(country string) ([]string, error) {
+	url := fmt.Sprintf(MIRRORS_URL, strings.ToUpper(country))
+
+	log.Printf("fetching %s", url)
+	response, err := http.Get(url)
 	if err != nil {
-		fmt.Printf("%s", err)
-		os.Exit(1)
+		return []string{}, err
 	}
 
 	defer response.Body.Close()
@@ -84,15 +90,49 @@ func mirrors() ([]string, error) {
 	return strings.Split(string(contents), "\n"), nil
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	mirrors, err := mirrors()
+func countryCode(r *http.Request) (string, error) {
+	remoteHostParts := strings.SplitN(r.RemoteAddr, ":", 2)
+
+	file := GEOIP_DB
+	if dbenv := os.Getenv("GEOIP_DB"); dbenv != "" {
+		file = dbenv
+	}
+
+	log.Printf("using %s for GeoIP database, looking up %s",
+		file, remoteHostParts[0])
+
+	gi, err := geoip.Open(file)
 	if err != nil {
-		log.Fatalf("Failed to get mirrors: %s", err.Error())
+		return "", err
+	}
+
+	if gi != nil {
+		country, _ := gi.GetCountry(remoteHostParts[0])
+		return country, nil
+	}
+
+	return "", nil
+}
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	country, err := countryCode(r)
+	if err != nil {
+		log.Fatalf("failed to get country code: %s", err.Error())
+	}
+
+	if country == "" {
+		log.Printf("failed to lookup %s, defaulting to US", r.RemoteAddr)
+		country = "US"
+	}
+
+	mirrors, err := mirrors(country)
+	if err != nil {
+		log.Fatalf("failed to get mirrors: %s", err.Error())
 	}
 
 	status, err := mirrorStatus()
 	if err != nil {
-		log.Fatalf("Failed to get mirrors status: %s", err.Error())
+		log.Fatalf("failed to get mirrors status: %s", err.Error())
 	}
 
 	// only output legit mirrors
@@ -104,8 +144,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	http.HandleFunc("/mirrors.txt", handler)
+	bindaddr := BIND_ADDR
 
-	log.Printf("Listening on :8900")
-	http.ListenAndServe(":8900", nil)
+	// allow bind address to be overriden
+	if bindenv := os.Getenv("BIND_ADDR"); bindenv != "" {
+		bindaddr = bindenv
+	}
+
+	http.HandleFunc("/", handler)
+	log.Printf("listening on %s", bindaddr)
+	if err := http.ListenAndServe(bindaddr, nil); err != nil {
+		log.Fatalf("listen failed: %s", err.Error())
+	}
 }
